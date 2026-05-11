@@ -1,0 +1,13 @@
+{
+  "name": "cccp",
+  "owner": {
+    "name": "ljh0801"
+  },
+  "plugins": [
+    {
+      "name": "cccp",
+      "source": "./",
+      "description": "Claude Code channels peer"
+    }
+  ]
+}
