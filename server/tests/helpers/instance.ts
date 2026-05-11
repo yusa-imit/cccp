@@ -15,6 +15,8 @@ export type Instance = {
   ): Promise<{ method: string; params: any }>
   /** Send a JSON-RPC notification to the server's stdin (simulating Claude Code). */
   sendNotification(method: string, params: any): Promise<void>
+  /** Invoke an MCP tool and await its response. */
+  callTool(name: string, args?: Record<string, unknown>): Promise<any>
   /** Stop the process and wait for exit. */
   stop(): Promise<void>
 }
@@ -48,6 +50,8 @@ export async function startInstance(opts: {
     predicate?: (p: any) => boolean
     resolve: (n: { method: string; params: any }) => void
   }[] = []
+  const pendingResponses = new Map<number, (msg: any) => void>()
+  let nextRequestId = 1
 
   ;(async () => {
     const decoder = new TextDecoder()
@@ -61,6 +65,15 @@ export async function startInstance(opts: {
         if (!line) continue
         try {
           const msg = JSON.parse(line)
+          // Response to a request we sent (has id, no method)
+          if (typeof msg.id === 'number' && msg.method === undefined) {
+            const resolver = pendingResponses.get(msg.id)
+            if (resolver) {
+              pendingResponses.delete(msg.id)
+              resolver(msg)
+            }
+            continue
+          }
           if (typeof msg.method === 'string') {
             const evt = { method: msg.method, params: msg.params }
             notifications.push(evt)
@@ -78,6 +91,17 @@ export async function startInstance(opts: {
       }
     }
   })()
+
+  async function writeStdin(payload: string) {
+    const writer = (proc.stdin as any).getWriter ? (proc.stdin as any).getWriter() : null
+    if (writer) {
+      await writer.write(new TextEncoder().encode(payload))
+      writer.releaseLock()
+    } else {
+      ;(proc.stdin as any).write(payload)
+      await (proc.stdin as any).flush?.()
+    }
+  }
 
   // Wait for the registry file to appear (means the HTTP server is listening)
   const regFile = join(opts.home, 'registry', `${opts.name}.json`)
@@ -121,18 +145,29 @@ export async function startInstance(opts: {
       })
     },
     async sendNotification(method, params) {
-      const writer = (proc.stdin as any).getWriter
-        ? (proc.stdin as any).getWriter()
-        : null
-      const payload = JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n'
-      if (writer) {
-        await writer.write(new TextEncoder().encode(payload))
-        writer.releaseLock()
-      } else {
-        // FileSink path
-        ;(proc.stdin as any).write(payload)
-        await (proc.stdin as any).flush?.()
-      }
+      await writeStdin(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
+    },
+    async callTool(name, args = {}) {
+      const id = nextRequestId++
+      const payload =
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name, arguments: args },
+        }) + '\n'
+      const responsePromise = new Promise<any>((resolve, reject) => {
+        pendingResponses.set(id, resolve)
+        setTimeout(() => {
+          if (pendingResponses.delete(id)) {
+            reject(new Error(`timeout waiting for tools/call response (id=${id}, name=${name})`))
+          }
+        }, 3000)
+      })
+      await writeStdin(payload)
+      const res = await responsePromise
+      if (res.error) throw new Error(`tools/call error: ${JSON.stringify(res.error)}`)
+      return res.result
     },
     async stop() {
       proc.kill()

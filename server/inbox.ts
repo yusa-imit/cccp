@@ -16,8 +16,8 @@ import {
 import { z } from 'zod'
 import { defaultName, findPeer, listPeers, registerSelf } from './lib/registry.ts'
 
-const NAME = defaultName()
-const VERSION = '0.1.0'
+let NAME = defaultName()
+const VERSION = '0.1.1'
 const SUPERVISOR = process.env.CCCP_SUPERVISOR?.trim() || ''
 
 const log = (...args: unknown[]) => console.error('[cccp:' + NAME + ']', ...args)
@@ -51,6 +51,8 @@ const instructions = [
   '    - Use kind="reply" only when answering a specific inbound task (prefer respond_to_peer instead).',
   '  respond_to_peer({ task_id, content }) — convenience reply to the original sender of a task you received.',
   '  list_peers() — list currently alive peer instances.',
+  '  whoami() — this instance\'s current registered name.',
+  '  register({ name }) — change this instance\'s name in the registry (so peers see it under the new name). Use when the user wants to rename / register the session at runtime instead of relying on the CCCP_NAME env var.',
   '  respond_permission({ peer, request_id, behavior }) — answer a peer\'s permission relay.',
   '',
   'When the user tells you to "tell / ask / have / make peer X do Y" or "send X to peer Y to run/build/check Z",',
@@ -147,6 +149,27 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: 'object', properties: {} },
     },
     {
+      name: 'whoami',
+      description: 'Return this instance\'s current registered name and URL.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'register',
+      description:
+        'Rename this instance in the peer registry. Replaces whatever name was set via CCCP_NAME (or auto-generated) so other peers see this session under the new name. Fails if another alive peer already holds that name.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description:
+              'New name for this instance. Allowed characters: letters, digits, underscore, hyphen, dot. Names with other characters are sanitized.',
+          },
+        },
+        required: ['name'],
+      },
+    },
+    {
       name: 'respond_permission',
       description:
         'Respond to a permission request that a peer forwarded to this session. Sends an allow/deny verdict back to the originating peer, which will resolve their pending tool-approval dialog.',
@@ -215,6 +238,32 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
                 )
                 .join('\n'),
         )
+      }
+
+      case 'whoami': {
+        return toolOk(`${NAME}  ${url}  pid=${process.pid}`)
+      }
+
+      case 'register': {
+        const requested = String(args.name ?? '').trim()
+        if (!requested) return toolErr('name is required')
+        if (requested === NAME) return toolOk(`already registered as "${NAME}"`)
+        const collision = listPeers().find((p) => p.name === requested && p.pid !== process.pid)
+        if (collision)
+          return toolErr(
+            `cannot register as "${requested}": already in use by pid=${collision.pid} at ${collision.url}`,
+          )
+        const previous = NAME
+        NAME = requested
+        try {
+          reregister()
+        } catch (err: any) {
+          NAME = previous
+          reregister()
+          return toolErr(`re-register failed: ${err?.message ?? String(err)}`)
+        }
+        log(`renamed: "${previous}" → "${NAME}"`)
+        return toolOk(`registered as "${NAME}" (was "${previous}")`)
       }
 
       case 'respond_permission': {
@@ -395,13 +444,19 @@ const server = Bun.serve({
 const url = `http://127.0.0.1:${server.port}`
 log('listening on', url)
 
-const cleanupRegistry = registerSelf({
-  name: NAME,
-  url,
-  pid: process.pid,
-  capabilities: ['channel', 'channel-permission'],
-  meta: SUPERVISOR ? { supervisor: SUPERVISOR } : undefined,
-})
+let cleanupRegistry: () => void = () => {}
+
+function reregister() {
+  cleanupRegistry()
+  cleanupRegistry = registerSelf({
+    name: NAME,
+    url,
+    pid: process.pid,
+    capabilities: ['channel', 'channel-permission'],
+    meta: SUPERVISOR ? { supervisor: SUPERVISOR } : undefined,
+  })
+}
+reregister()
 
 process.on('beforeExit', () => {
   try {

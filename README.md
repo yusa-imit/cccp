@@ -215,6 +215,8 @@ body
 - `send_to_peer({ to, content, kind?, task_id? })`
 - `respond_to_peer({ task_id, content })`
 - `list_peers()`
+- `whoami()` — this instance's current name and URL
+- `register({ name })` — rename this instance at runtime (slash command: `/cccp-register <name>`). Lets you skip the `CCCP_NAME` env var.
 - `respond_permission({ peer, request_id, behavior })`
 
 ### HTTP endpoints (inbox-to-inbox traffic)

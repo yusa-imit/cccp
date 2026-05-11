@@ -156,6 +156,87 @@ describe('inbound /permission/verdict', () => {
   })
 })
 
+describe('register tool', () => {
+  test('renames the instance in the registry', async () => {
+    const inst = await spawn('original')
+    expect(await registryHas(TMP, 'original')).toBe(true)
+
+    // initialize MCP session (required before request-style calls in some SDK setups)
+    await initializeMcp(inst)
+
+    const res = await inst.callTool('register', { name: 'renamed' })
+    expect(textOf(res)).toContain('registered as "renamed"')
+
+    expect(await registryHas(TMP, 'renamed')).toBe(true)
+    expect(await registryHas(TMP, 'original')).toBe(false)
+
+    // whoami reflects new name
+    const who = await inst.callTool('whoami')
+    expect(textOf(who)).toContain('renamed')
+  })
+
+  test('rejects renaming to a name already held by another live peer', async () => {
+    const a = await spawn('a')
+    const b = await spawn('b')
+    await initializeMcp(b)
+
+    const res = await b.callTool('register', { name: 'a' })
+    expect(res.isError).toBe(true)
+    expect(textOf(res)).toMatch(/already in use/)
+
+    // b is still under its original name
+    expect(await registryHas(TMP, 'b')).toBe(true)
+  })
+
+  test('renaming to the same name is a no-op success', async () => {
+    const inst = await spawn('same')
+    await initializeMcp(inst)
+    const res = await inst.callTool('register', { name: 'same' })
+    expect(res.isError).toBeUndefined()
+    expect(textOf(res)).toContain('already registered')
+  })
+})
+
+function textOf(res: any): string {
+  if (!res?.content) return ''
+  return res.content
+    .filter((c: any) => c.type === 'text')
+    .map((c: any) => c.text)
+    .join('\n')
+}
+
+async function registryHas(home: string, name: string): Promise<boolean> {
+  const path = join(home, 'registry', `${name}.json`)
+  try {
+    require('node:fs').statSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function initializeMcp(inst: Instance) {
+  // Drive the MCP initialize handshake so request-style calls (tools/call) are accepted.
+  await (inst.proc.stdin as any).write?.(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 0,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'cccp-test', version: '0.0.0' },
+      },
+    }) + '\n',
+  )
+  // Allow the server to process the initialize round-trip
+  await Bun.sleep(150)
+  await (inst.proc.stdin as any).write?.(
+    JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) + '\n',
+  )
+  await Bun.sleep(50)
+}
+
 describe('outbound permission relay (full loop)', () => {
   test(
     'supervised instance forwards permission_request to supervisor, and supervisor verdict resolves it',

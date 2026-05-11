@@ -211,6 +211,8 @@ bob의 Claude가 예를 들어 `Bash` 도구를 호출하면:
 - `send_to_peer({ to, content, kind?, task_id? })`
 - `respond_to_peer({ task_id, content })`
 - `list_peers()`
+- `whoami()` — 이 인스턴스의 현재 이름·URL
+- `register({ name })` — 런타임에 인스턴스 이름 변경 (슬래시 커맨드: `/cccp-register <name>`). `CCCP_NAME` 환경 변수 없이도 가능.
 - `respond_permission({ peer, request_id, behavior })`
 
 ### HTTP 엔드포인트 (inbox 간 통신)
