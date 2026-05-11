@@ -5,8 +5,7 @@
   "author": { "name": "ljh0801" },
   "mcpServers": {
     "cccp-inbox": {
-      "command": "bun",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/server/inbox.ts"]
+      "command": "${CLAUDE_PLUGIN_ROOT}/server/start.sh"
     }
   },
   "hooks": {
