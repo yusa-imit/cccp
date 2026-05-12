@@ -1,21 +1,20 @@
 {
-  "name": "cccp-inbox-server",
+  "name": "ccp-inbox-server",
   "version": "0.1.1",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "bun run inbox.ts",
     "test": "bun test",
-    "build": "bun build --compile --minify --sourcemap inbox.ts --outfile dist/cccp-inbox",
-    "build:darwin-arm64": "bun build --compile --minify --sourcemap --target=bun-darwin-arm64 inbox.ts --outfile dist/cccp-inbox-darwin-arm64",
-    "build:darwin-x64": "bun build --compile --minify --sourcemap --target=bun-darwin-x64 inbox.ts --outfile dist/cccp-inbox-darwin-x64",
-    "build:linux-x64": "bun build --compile --minify --sourcemap --target=bun-linux-x64 inbox.ts --outfile dist/cccp-inbox-linux-x64",
-    "build:linux-arm64": "bun build --compile --minify --sourcemap --target=bun-linux-arm64 inbox.ts --outfile dist/cccp-inbox-linux-arm64",
+    "build": "bun build --compile --minify --sourcemap inbox.ts --outfile dist/ccp-inbox",
+    "build:darwin-arm64": "bun build --compile --minify --sourcemap --target=bun-darwin-arm64 inbox.ts --outfile dist/ccp-inbox-darwin-arm64",
+    "build:darwin-x64": "bun build --compile --minify --sourcemap --target=bun-darwin-x64 inbox.ts --outfile dist/ccp-inbox-darwin-x64",
+    "build:linux-x64": "bun build --compile --minify --sourcemap --target=bun-linux-x64 inbox.ts --outfile dist/ccp-inbox-linux-x64",
+    "build:linux-arm64": "bun build --compile --minify --sourcemap --target=bun-linux-arm64 inbox.ts --outfile dist/ccp-inbox-linux-arm64",
     "build:all": "bun run build:darwin-arm64 && bun run build:darwin-x64 && bun run build:linux-x64 && bun run build:linux-arm64"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "zod": "^3.23.0"
+    "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

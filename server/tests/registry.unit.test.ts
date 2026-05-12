@@ -7,31 +7,31 @@ import { defaultName, findPeer, listPeers, registerSelf } from '../lib/registry.
 let TMP = ''
 
 beforeEach(() => {
-  TMP = mkdtempSync(join(tmpdir(), 'cccp-test-'))
-  process.env.CCCP_HOME = TMP
-  delete process.env.CCCP_NAME
+  TMP = mkdtempSync(join(tmpdir(), 'ccp-test-'))
+  process.env.CCP_HOME = TMP
+  delete process.env.CCP_NAME
 })
 
 afterEach(() => {
-  delete process.env.CCCP_HOME
-  delete process.env.CCCP_NAME
+  delete process.env.CCP_HOME
+  delete process.env.CCP_NAME
   rmSync(TMP, { recursive: true, force: true })
 })
 
 describe('defaultName', () => {
-  test('uses CCCP_NAME when set', () => {
-    process.env.CCCP_NAME = 'alpha'
+  test('uses CCP_NAME when set', () => {
+    process.env.CCP_NAME = 'alpha'
     expect(defaultName()).toBe('alpha')
   })
 
   test('falls back to hostname-pid pattern', () => {
-    delete process.env.CCCP_NAME
+    delete process.env.CCP_NAME
     const n = defaultName()
     expect(n).toMatch(/.+-\d+$/)
   })
 
   test('trims whitespace in env value', () => {
-    process.env.CCCP_NAME = '  beta  '
+    process.env.CCP_NAME = '  beta  '
     expect(defaultName()).toBe('beta')
   })
 })

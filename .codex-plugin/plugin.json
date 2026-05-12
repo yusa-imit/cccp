@@ -1,0 +1,26 @@
+{
+  "name": "ccp",
+  "version": "0.1.1",
+  "description": "Codex channels peer",
+  "author": {
+    "name": "ljh0801"
+  },
+  "keywords": ["codex", "peer", "mcp", "coordination"],
+  "skills": "./skills/",
+  "hooks": "./hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "CCP",
+    "shortDescription": "Peer messaging for Codex sessions",
+    "longDescription": "Run a local MCP inbox so Codex sessions can discover peers, delegate tasks, exchange replies, and relay permission requests on the same machine.",
+    "developerName": "ljh0801",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "MCP", "Hooks"],
+    "defaultPrompt": [
+      "List available Codex peers.",
+      "Delegate this task to a peer.",
+      "Fetch replies from my peers."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

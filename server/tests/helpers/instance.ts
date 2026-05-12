@@ -13,7 +13,7 @@ export type Instance = {
     predicate?: (params: any) => boolean,
     timeoutMs?: number,
   ): Promise<{ method: string; params: any }>
-  /** Send a JSON-RPC notification to the server's stdin (simulating Claude Code). */
+  /** Send a JSON-RPC notification to the server's stdin (simulating Codex). */
   sendNotification(method: string, params: any): Promise<void>
   /** Invoke an MCP tool and await its response. */
   callTool(name: string, args?: Record<string, unknown>): Promise<any>
@@ -32,10 +32,10 @@ export async function startInstance(opts: {
 }): Promise<Instance> {
   const env: Record<string, string> = {
     ...process.env,
-    CCCP_NAME: opts.name,
-    CCCP_HOME: opts.home,
+    CCP_NAME: opts.name,
+    CCP_HOME: opts.home,
   }
-  if (opts.supervisor) env.CCCP_SUPERVISOR = opts.supervisor
+  if (opts.supervisor) env.CCP_SUPERVISOR = opts.supervisor
 
   const proc = Bun.spawn(['bun', INBOX_PATH], {
     env,
@@ -179,7 +179,7 @@ export async function startInstance(opts: {
 export async function postJSON(url: string, body: unknown, sender = 'test-runner') {
   return fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-CCCP-Sender': sender },
+    headers: { 'Content-Type': 'application/json', 'X-CCP-Sender': sender },
     body: JSON.stringify(body),
   })
 }

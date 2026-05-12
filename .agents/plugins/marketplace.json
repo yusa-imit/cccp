@@ -1,0 +1,20 @@
+{
+  "name": "ccp-local",
+  "interface": {
+    "displayName": "CCP Local"
+  },
+  "plugins": [
+    {
+      "name": "ccp",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,10 +1,10 @@
 ---
-description: Claude Code channels peer
+description: Codex channels peer
 argument-hint: <name>
 allowed-tools:
-  - mcp__cccp-inbox__register
-  - mcp__cccp-inbox__whoami
-  - mcp__cccp-inbox__list_peers
+  - mcp__ccp-inbox__register
+  - mcp__ccp-inbox__whoami
+  - mcp__ccp-inbox__list_peers
 ---
 
 Arguments: `$ARGUMENTS` (the new name for this instance).

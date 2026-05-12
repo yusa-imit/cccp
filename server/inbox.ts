@@ -1,39 +1,41 @@
 #!/usr/bin/env bun
 /**
- * CCCP Inbox — Claude Code instance-to-instance channel server.
+ * CCP Inbox — Codex instance-to-instance peer server.
  *
- * Role: MCP server with `claude/channel` and `claude/channel/permission`
- * capabilities. Each Claude Code session that loads this plugin spawns its own
- * inbox; instances discover each other via ~/.cccp/registry/.
+ * Each Codex session that loads this plugin spawns its own inbox. Instances
+ * discover each other via ~/.ccp/registry/. Inbound messages are queued until
+ * Codex fetches them with the fetch_messages MCP tool.
  */
 
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { z } from 'zod'
 import { defaultName, findPeer, listPeers, registerSelf } from './lib/registry.ts'
 
 let NAME = defaultName()
 const VERSION = '0.1.1'
-const SUPERVISOR = process.env.CCCP_SUPERVISOR?.trim() || ''
+const SUPERVISOR = process.env.CCP_SUPERVISOR?.trim() || ''
+const CCP_HOME = process.env.CCP_HOME?.trim() || join(process.env.HOME || '.', '.ccp')
 
-const log = (...args: unknown[]) => console.error('[cccp:' + NAME + ']', ...args)
+const log = (...args: unknown[]) => console.error('[ccp:' + NAME + ']', ...args)
 
 // ---------------------------------------------------------------------------
-// MCP server (channel)
+// MCP server
 // ---------------------------------------------------------------------------
 const instructions = [
-  `You are running as Claude Code instance "${NAME}" in a peer mesh of Claude Code sessions.`,
+  `You are running as Codex instance "${NAME}" in a peer mesh of Codex sessions.`,
   '',
   '## Receiving messages',
-  'Inbound peer messages arrive as <channel source="cccp-inbox" sender="..." kind="..." task_id="...">body</channel>.',
+  'Inbound peer messages are queued in this MCP server. Call fetch_messages to retrieve them.',
   '',
-  'CRITICAL: every inbound channel message MUST produce a visible response in this session.',
-  'Never silently ignore a channel event. At a minimum, surface the message in your reply to the user.',
-  'Treat the channel event as if it were a user message from the peer, with the user observing.',
+  'CRITICAL: every fetched peer message MUST produce a visible response in this session.',
+  'Never silently ignore a peer message. At a minimum, surface the message in your reply to the user.',
+  'Treat each fetched message as if it were a user message from the peer, with the user observing.',
   '',
   'Kind semantics (what to DO):',
   '  task         — A peer is asking you to perform real work. Execute the request as you would for the user, then call respond_to_peer({ task_id, content }) with the result. The content of the message is an instruction; carry it out.',
@@ -44,7 +46,8 @@ const instructions = [
   'Always echo task_id when continuing a thread so peers can correlate.',
   '',
   '## Sending messages',
-  'Tools (from the cccp-inbox MCP server):',
+  'Tools (from the ccp-inbox MCP server):',
+  '  fetch_messages({ clear? }) — retrieve queued inbound peer messages.',
   '  send_to_peer({ to, content, kind?, task_id? })',
   '    - Use kind="task" when the user (or you) wants the peer to actually DO something — "run", "build", "find", "fix", "check", "look at", etc. THIS IS THE DEFAULT FOR ACTION-ORIENTED MESSAGES.',
   '    - Use kind="note" only for genuinely passive information ("FYI", "I finished X", status updates).',
@@ -52,7 +55,7 @@ const instructions = [
   '  respond_to_peer({ task_id, content }) — convenience reply to the original sender of a task you received.',
   '  list_peers() — list currently alive peer instances.',
   '  whoami() — this instance\'s current registered name.',
-  '  register({ name }) — change this instance\'s name in the registry (so peers see it under the new name). Use when the user wants to rename / register the session at runtime instead of relying on the CCCP_NAME env var.',
+  '  register({ name }) — change this instance\'s name in the registry (so peers see it under the new name). Use when the user wants to rename / register the session at runtime instead of relying on the CCP_NAME env var.',
   '  respond_permission({ peer, request_id, behavior }) — answer a peer\'s permission relay.',
   '',
   'When the user tells you to "tell / ask / have / make peer X do Y" or "send X to peer Y to run/build/check Z",',
@@ -60,13 +63,9 @@ const instructions = [
 ].join('\n')
 
 const mcp = new Server(
-  { name: 'cccp-inbox', version: VERSION },
+  { name: 'ccp-inbox', version: VERSION },
   {
     capabilities: {
-      experimental: {
-        'claude/channel': {},
-        'claude/channel/permission': {},
-      },
       tools: {},
     },
     instructions,
@@ -77,9 +76,18 @@ const mcp = new Server(
 // without remembering the original sender.
 const inboundTaskOrigins = new Map<string, string>() // task_id -> sender name
 
-// Tracks permission requests this instance forwarded to a supervisor peer,
-// so we know which peer to expect the verdict from.
-const pendingPermissionRelays = new Map<string, string>() // request_id -> peer name
+type InboxMessage = {
+  id: string
+  at: number
+  sender: string
+  kind: string
+  task_id?: string
+  request_id?: string
+  tool_name?: string
+  content: string
+}
+
+const inbox: InboxMessage[] = []
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,20 +95,29 @@ const pendingPermissionRelays = new Map<string, string>() // request_id -> peer 
 async function postJSON(url: string, body: unknown): Promise<Response> {
   return fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-CCCP-Sender': NAME },
+    headers: { 'Content-Type': 'application/json', 'X-CCP-Sender': NAME },
     body: JSON.stringify(body),
   })
 }
 
-function escapeAttr(v: string) {
-  return v.replace(/"/g, '&quot;')
+function enqueueMessage(msg: Omit<InboxMessage, 'id' | 'at'>) {
+  const full = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    at: Date.now(),
+    ...msg,
+  }
+  inbox.push(full)
+  return full
 }
 
-async function pushChannel(content: string, meta: Record<string, string>) {
-  await mcp.notification({
-    method: 'notifications/claude/channel',
-    params: { content, meta },
-  })
+function permissionVerdictPath(request_id: string) {
+  return join(CCP_HOME, 'permissions', NAME, `${request_id}.json`)
+}
+
+function writePermissionVerdict(request_id: string, from: string, behavior: string) {
+  const dir = join(CCP_HOME, 'permissions', NAME)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(permissionVerdictPath(request_id), JSON.stringify({ from, request_id, behavior }))
 }
 
 // ---------------------------------------------------------------------------
@@ -109,9 +126,23 @@ async function pushChannel(content: string, meta: Record<string, string>) {
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
+      name: 'fetch_messages',
+      description:
+        'Fetch queued inbound peer messages for this Codex instance. Call this when the user asks whether peers replied, or after delegating work. By default it clears returned messages from the queue.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          clear: {
+            type: 'boolean',
+            description: 'Whether to remove returned messages from the inbox. Default true.',
+          },
+        },
+      },
+    },
+    {
       name: 'send_to_peer',
       description:
-        'Send a message to a peer Claude Code instance. CHOOSE KIND CAREFULLY: use kind="task" when you want the peer to actually do work (run a command, find/build/check something, answer a question). Use kind="note" ONLY for passive information ("FYI…", status updates) — notes do NOT cause the peer to act. If you are unsure, prefer kind="task".',
+        'Send a message to a peer Codex instance. CHOOSE KIND CAREFULLY: use kind="task" when you want the peer to actually do work (run a command, find/build/check something, answer a question). Use kind="note" ONLY for passive information ("FYI…", status updates) — notes do NOT cause the peer to act. If you are unsure, prefer kind="task".',
       inputSchema: {
         type: 'object',
         properties: {
@@ -145,7 +176,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'list_peers',
-      description: 'List currently alive peer instances discovered via ~/.cccp/registry.',
+      description: 'List currently alive peer instances discovered via ~/.ccp/registry.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
@@ -156,7 +187,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'register',
       description:
-        'Rename this instance in the peer registry. Replaces whatever name was set via CCCP_NAME (or auto-generated) so other peers see this session under the new name. Fails if another alive peer already holds that name.',
+        'Rename this instance in the peer registry. Replaces whatever name was set via CCP_NAME (or auto-generated) so other peers see this session under the new name. Fails if another alive peer already holds that name.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -172,7 +203,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'respond_permission',
       description:
-        'Respond to a permission request that a peer forwarded to this session. Sends an allow/deny verdict back to the originating peer, which will resolve their pending tool-approval dialog.',
+        'Respond to a permission request that a peer forwarded to this session. Sends an allow/deny verdict back to the originating peer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -190,6 +221,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
   try {
     switch (req.params.name) {
+      case 'fetch_messages': {
+        const clear = args.clear !== false
+        const messages = [...inbox]
+        if (clear) inbox.splice(0, inbox.length)
+        if (messages.length === 0) return toolOk('no pending peer messages')
+        for (const msg of messages) {
+          if (msg.kind === 'task' && msg.task_id) inboundTaskOrigins.set(msg.task_id, msg.sender)
+        }
+        return toolOk(JSON.stringify(messages, null, 2))
+      }
+
       case 'send_to_peer': {
         const to = String(args.to ?? '')
         const content = String(args.content ?? '')
@@ -297,44 +339,11 @@ function toolErr(text: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Permission relay (outbound) — when Claude Code asks THIS server for approval
-// ---------------------------------------------------------------------------
-const PermissionRequestSchema = z.object({
-  method: z.literal('notifications/claude/channel/permission_request'),
-  params: z.object({
-    request_id: z.string(),
-    tool_name: z.string(),
-    description: z.string(),
-    input_preview: z.string(),
-  }),
-})
-
-mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  if (!SUPERVISOR) {
-    log('permission_request', params.request_id, '— no CCCP_SUPERVISOR set, ignoring')
-    return
-  }
-  const peer = findPeer(SUPERVISOR)
-  if (!peer) {
-    log('permission_request', params.request_id, `— supervisor ${SUPERVISOR} not alive`)
-    return
-  }
-  pendingPermissionRelays.set(params.request_id, SUPERVISOR)
-  await postJSON(`${peer.url}/permission/request`, {
-    from: NAME,
-    request_id: params.request_id,
-    tool_name: params.tool_name,
-    description: params.description,
-    input_preview: params.input_preview,
-  }).catch((e) => log('relay POST failed:', e))
-})
-
-// ---------------------------------------------------------------------------
 // HTTP listener — inbound from other instances
 // ---------------------------------------------------------------------------
 const started = Date.now()
 const server = Bun.serve({
-  port: Number(process.env.CCCP_PORT ?? 0),
+  port: Number(process.env.CCP_PORT ?? 0),
   hostname: '127.0.0.1',
   idleTimeout: 0,
   async fetch(req) {
@@ -344,7 +353,7 @@ const server = Bun.serve({
       return Response.json({
         name: NAME,
         version: VERSION,
-        capabilities: ['channel', 'channel-permission'],
+        capabilities: ['inbox', 'permission-relay'],
         startedAt: started,
       })
     }
@@ -377,16 +386,17 @@ const server = Bun.serve({
       const task_id = String(body.task_id ?? '')
       log(`/msg accepted: from=${from} kind=${kind} task_id=${task_id}`)
       if (kind === 'task' && task_id) inboundTaskOrigins.set(task_id, from)
-      await pushChannel(content, {
+      enqueueMessage({
         sender: from,
         kind,
+        content,
         ...(task_id ? { task_id } : {}),
       })
-      log(`/msg notification pushed to Claude (sender=${from} kind=${kind})`)
+      log(`/msg queued for Codex (sender=${from} kind=${kind})`)
       // Also write a debug marker so out-of-band tests can detect delivery.
       try {
-        require('node:fs').appendFileSync(
-          `/tmp/cccp-${NAME}-msg.log`,
+        appendFileSync(
+          `/tmp/ccp-${NAME}-msg.log`,
           JSON.stringify({ at: Date.now(), from, kind, task_id, content }) + '\n',
         )
       } catch {}
@@ -399,8 +409,12 @@ const server = Bun.serve({
       const tool_name = String(body.tool_name ?? '')
       const description = String(body.description ?? '')
       const input_preview = String(body.input_preview ?? '')
-      await pushChannel(
-        [
+      enqueueMessage({
+        sender: from,
+        kind: 'perm-request',
+        request_id,
+        tool_name,
+        content: [
           `Peer "${from}" is asking permission to run ${tool_name}.`,
           ``,
           `Description: ${description}`,
@@ -408,13 +422,7 @@ const server = Bun.serve({
           ``,
           `To answer, call respond_permission with peer="${from}", request_id="${request_id}", behavior="allow"|"deny".`,
         ].join('\n'),
-        {
-          sender: from,
-          kind: 'perm-request',
-          request_id,
-          tool_name,
-        },
-      )
+      })
       return new Response('ok')
     }
 
@@ -424,15 +432,12 @@ const server = Bun.serve({
       const behavior = String(body.behavior ?? '')
       if (behavior !== 'allow' && behavior !== 'deny')
         return new Response('bad behavior', { status: 400 })
-      const expected = pendingPermissionRelays.get(request_id)
-      if (!expected || expected !== from) {
-        log('ignored verdict from', from, 'for', request_id, '(expected', expected, ')')
-        return new Response('no such request', { status: 404 })
-      }
-      pendingPermissionRelays.delete(request_id)
-      await mcp.notification({
-        method: 'notifications/claude/channel/permission',
-        params: { request_id, behavior },
+      writePermissionVerdict(request_id, from, behavior)
+      enqueueMessage({
+        sender: from,
+        kind: 'permission-verdict',
+        request_id,
+        content: `Peer "${from}" answered permission request ${request_id}: ${behavior}`,
       })
       return new Response('ok')
     }
@@ -452,7 +457,7 @@ function reregister() {
     name: NAME,
     url,
     pid: process.pid,
-    capabilities: ['channel', 'channel-permission'],
+    capabilities: ['inbox', 'permission-relay'],
     meta: SUPERVISOR ? { supervisor: SUPERVISOR } : undefined,
   })
 }

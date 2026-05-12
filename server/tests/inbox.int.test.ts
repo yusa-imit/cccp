@@ -8,7 +8,7 @@ let TMP = ''
 const active: Instance[] = []
 
 beforeEach(() => {
-  TMP = mkdtempSync(join(tmpdir(), 'cccp-int-'))
+  TMP = mkdtempSync(join(tmpdir(), 'ccp-int-'))
 })
 
 afterEach(async () => {
@@ -18,6 +18,7 @@ afterEach(async () => {
 
 async function spawn(name: string, opts: { supervisor?: string } = {}) {
   const inst = await startInstance({ name, home: TMP, supervisor: opts.supervisor })
+  await initializeMcp(inst)
   active.push(inst)
   return inst
 }
@@ -38,12 +39,12 @@ describe('peer discovery', () => {
     const alice = await spawn('alice')
     const info = await fetch(`${alice.url}/info`).then((r) => r.json() as Promise<any>)
     expect(info.name).toBe('alice')
-    expect(info.capabilities).toEqual(['channel', 'channel-permission'])
+    expect(info.capabilities).toEqual(['inbox', 'permission-relay'])
   })
 })
 
 describe('inbound /msg', () => {
-  test('emits a channel notification on the receiver when sender is a known peer', async () => {
+  test('queues a message on the receiver when sender is a known peer', async () => {
     const alice = await spawn('alice')
     const bob = await spawn('bob')
 
@@ -55,21 +56,18 @@ describe('inbound /msg', () => {
     })
     expect(res.status).toBe(200)
 
-    const evt = await bob.waitForNotification(
-      'notifications/claude/channel',
-      (p) => p.meta.task_id === 't-1',
-    )
-    expect(evt.params.content).toBe('please count files')
-    expect(evt.params.meta).toMatchObject({
+    const messages = await fetchMessages(bob)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
       sender: 'alice',
       kind: 'task',
       task_id: 't-1',
+      content: 'please count files',
     })
   })
 
-  test('rejects unknown senders with 403 and no notification is emitted', async () => {
+  test('rejects unknown senders with 403 and does not queue a message', async () => {
     const bob = await spawn('bob')
-    const before = bob.notifications.length
 
     const res = await postJSON(`${bob.url}/msg`, {
       from: 'eve',
@@ -79,7 +77,7 @@ describe('inbound /msg', () => {
     expect(res.status).toBe(403)
 
     await Bun.sleep(150)
-    expect(bob.notifications.length).toBe(before)
+    expect(textOf(await bob.callTool('fetch_messages'))).toBe('no pending peer messages')
   })
 
   test('rejects missing `from` field with 400', async () => {
@@ -96,15 +94,13 @@ describe('inbound /msg', () => {
       content: 'self test',
     })
     expect(res.status).toBe(200)
-    await alice.waitForNotification(
-      'notifications/claude/channel',
-      (p) => p.content === 'self test',
-    )
+    const messages = await fetchMessages(alice)
+    expect(messages[0]).toMatchObject({ sender: 'alice', kind: 'note', content: 'self test' })
   })
 })
 
 describe('inbound /permission/request', () => {
-  test('emits a perm-request channel notification with all fields as attributes', async () => {
+  test('queues a perm-request message with all fields', async () => {
     const alice = await spawn('alice')
     const bob = await spawn('bob')
 
@@ -116,24 +112,21 @@ describe('inbound /permission/request', () => {
       input_preview: 'ls -la',
     })
 
-    const evt = await alice.waitForNotification(
-      'notifications/claude/channel',
-      (p) => p.meta.kind === 'perm-request',
-    )
-    expect(evt.params.meta).toMatchObject({
+    const messages = await fetchMessages(alice)
+    expect(messages[0]).toMatchObject({
       sender: 'bob',
       kind: 'perm-request',
       request_id: 'abcde',
       tool_name: 'Bash',
     })
-    expect(evt.params.content).toContain('Bash')
-    expect(evt.params.content).toContain('abcde')
-    expect(evt.params.content).toContain('list files')
+    expect(messages[0].content).toContain('Bash')
+    expect(messages[0].content).toContain('abcde')
+    expect(messages[0].content).toContain('list files')
   })
 })
 
 describe('inbound /permission/verdict', () => {
-  test('returns 404 when no pending request matches', async () => {
+  test('accepts a verdict and queues it for visibility', async () => {
     const alice = await spawn('alice')
     const bob = await spawn('bob')
     const res = await postJSON(`${alice.url}/permission/verdict`, {
@@ -141,7 +134,13 @@ describe('inbound /permission/verdict', () => {
       request_id: 'zzzzz',
       behavior: 'allow',
     })
-    expect(res.status).toBe(404)
+    expect(res.status).toBe(200)
+    const messages = await fetchMessages(alice)
+    expect(messages[0]).toMatchObject({
+      sender: 'bob',
+      kind: 'permission-verdict',
+      request_id: 'zzzzz',
+    })
   })
 
   test('rejects bad behavior with 400', async () => {
@@ -161,9 +160,6 @@ describe('register tool', () => {
     const inst = await spawn('original')
     expect(await registryHas(TMP, 'original')).toBe(true)
 
-    // initialize MCP session (required before request-style calls in some SDK setups)
-    await initializeMcp(inst)
-
     const res = await inst.callTool('register', { name: 'renamed' })
     expect(textOf(res)).toContain('registered as "renamed"')
 
@@ -178,7 +174,6 @@ describe('register tool', () => {
   test('rejects renaming to a name already held by another live peer', async () => {
     const a = await spawn('a')
     const b = await spawn('b')
-    await initializeMcp(b)
 
     const res = await b.callTool('register', { name: 'a' })
     expect(res.isError).toBe(true)
@@ -190,7 +185,6 @@ describe('register tool', () => {
 
   test('renaming to the same name is a no-op success', async () => {
     const inst = await spawn('same')
-    await initializeMcp(inst)
     const res = await inst.callTool('register', { name: 'same' })
     expect(res.isError).toBeUndefined()
     expect(textOf(res)).toContain('already registered')
@@ -215,6 +209,11 @@ async function registryHas(home: string, name: string): Promise<boolean> {
   }
 }
 
+async function fetchMessages(inst: Instance): Promise<any[]> {
+  const text = textOf(await inst.callTool('fetch_messages'))
+  return JSON.parse(text)
+}
+
 async function initializeMcp(inst: Instance) {
   // Drive the MCP initialize handshake so request-style calls (tools/call) are accepted.
   await (inst.proc.stdin as any).write?.(
@@ -225,7 +224,7 @@ async function initializeMcp(inst: Instance) {
       params: {
         protocolVersion: '2024-11-05',
         capabilities: {},
-        clientInfo: { name: 'cccp-test', version: '0.0.0' },
+        clientInfo: { name: 'ccp-test', version: '0.0.0' },
       },
     }) + '\n',
   )
@@ -237,45 +236,39 @@ async function initializeMcp(inst: Instance) {
   await Bun.sleep(50)
 }
 
-describe('outbound permission relay (full loop)', () => {
-  test(
-    'supervised instance forwards permission_request to supervisor, and supervisor verdict resolves it',
-    async () => {
-      // alice acts as supervisor; bob is supervised
-      const alice = await spawn('alice')
-      const bob = await spawn('bob', { supervisor: 'alice' })
+describe('permission relay loop', () => {
+  test('supervisor can receive a request and send a verdict back to the requester', async () => {
+    const alice = await spawn('alice')
+    const bob = await spawn('bob', { supervisor: 'alice' })
 
-      // Simulate Claude Code asking bob's MCP server for a permission decision
-      await bob.sendNotification('notifications/claude/channel/permission_request', {
-        request_id: 'qwert',
-        tool_name: 'Bash',
-        description: 'delete /tmp/test',
-        input_preview: 'rm -rf /tmp/test',
-      })
+    const request = await postJSON(`${alice.url}/permission/request`, {
+      from: 'bob',
+      request_id: 'qwert',
+      tool_name: 'Bash',
+      description: 'delete /tmp/test',
+      input_preview: 'rm -rf /tmp/test',
+    })
+    expect(request.status).toBe(200)
 
-      // alice's inbox should have received the relay and pushed a perm-request notification
-      const relayed = await alice.waitForNotification(
-        'notifications/claude/channel',
-        (p) => p.meta.request_id === 'qwert',
-      )
-      expect(relayed.params.meta.sender).toBe('bob')
-      expect(relayed.params.meta.kind).toBe('perm-request')
+    const relayed = await fetchMessages(alice)
+    expect(relayed[0]).toMatchObject({
+      sender: 'bob',
+      kind: 'perm-request',
+      request_id: 'qwert',
+    })
 
-      // alice answers: POST verdict back to bob
-      const res = await postJSON(`${bob.url}/permission/verdict`, {
-        from: 'alice',
-        request_id: 'qwert',
-        behavior: 'allow',
-      })
-      expect(res.status).toBe(200)
+    const verdict = await alice.callTool('respond_permission', {
+      peer: 'bob',
+      request_id: 'qwert',
+      behavior: 'allow',
+    })
+    expect(textOf(verdict)).toContain('verdict "allow" sent to bob')
 
-      // bob must emit notifications/claude/channel/permission so Claude Code closes its dialog
-      const verdict = await bob.waitForNotification(
-        'notifications/claude/channel/permission',
-        (p) => p.request_id === 'qwert',
-      )
-      expect(verdict.params.behavior).toBe('allow')
-    },
-    15_000,
-  )
+    const bobMessages = await fetchMessages(bob)
+    expect(bobMessages[0]).toMatchObject({
+      sender: 'alice',
+      kind: 'permission-verdict',
+      request_id: 'qwert',
+    })
+  })
 })

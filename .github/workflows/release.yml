@@ -22,13 +22,13 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            artifact: cccp-inbox-darwin-arm64
+            artifact: ccp-inbox-darwin-arm64
           - target: darwin-x64
-            artifact: cccp-inbox-darwin-x64
+            artifact: ccp-inbox-darwin-x64
           - target: linux-x64
-            artifact: cccp-inbox-linux-x64
+            artifact: ccp-inbox-linux-x64
           - target: linux-arm64
-            artifact: cccp-inbox-linux-arm64
+            artifact: ccp-inbox-linux-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
             cp "$d/$name" "release/$name"
             chmod +x "release/$name"
           done
-          (cd release && sha256sum cccp-inbox-* > SHA256SUMS)
+          (cd release && sha256sum ccp-inbox-* > SHA256SUMS)
           ls -la release/
 
       - name: Create / update GitHub Release
@@ -99,8 +99,8 @@ jobs:
           name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
           files: |
-            release/cccp-inbox-darwin-arm64
-            release/cccp-inbox-darwin-x64
-            release/cccp-inbox-linux-x64
-            release/cccp-inbox-linux-arm64
+            release/ccp-inbox-darwin-arm64
+            release/ccp-inbox-darwin-x64
+            release/ccp-inbox-linux-x64
+            release/ccp-inbox-linux-arm64
             release/SHA256SUMS

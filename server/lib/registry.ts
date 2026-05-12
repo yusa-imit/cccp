@@ -12,7 +12,7 @@ export type PeerRecord = {
 }
 
 function registryDir() {
-  const base = process.env.CCCP_HOME?.trim() || join(homedir(), '.cccp')
+  const base = process.env.CCP_HOME?.trim() || join(homedir(), '.ccp')
   return join(base, 'registry')
 }
 const STALE_MS = 60_000
@@ -39,7 +39,7 @@ function sanitize(name: string) {
 }
 
 export function defaultName(): string {
-  const envName = process.env.CCCP_NAME?.trim()
+  const envName = process.env.CCP_NAME?.trim()
   if (envName) return envName
   return `${hostname().split('.')[0]}-${process.pid}`
 }

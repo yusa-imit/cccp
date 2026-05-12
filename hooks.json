@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./hooks/permission-request.sh",
+            "statusMessage": "Relaying permission request to CCP supervisor"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./hooks/stop-notify.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
