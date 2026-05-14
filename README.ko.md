@@ -201,29 +201,56 @@ bob의 Claude가 예를 들어 `Bash` 도구를 호출하면:
 ### Channel 태그 (수신측 컨텍스트)
 
 ```
-<channel source="cccp-inbox" sender="<peer>" kind="task|reply|note|perm-request" task_id="..."[, ...]>
+<channel source="cccp-inbox" sender="<peer>" kind="task|reply|note|perm-request" task_id="..." [parent_task_id="..."] [room="..."]>
 본문
 </channel>
 ```
 
+`parent_task_id`는 발신자가 외부 task의 하위 작업을 위임할 때 붙습니다. `room`은 `send_to_room`으로 전송된 경우에 붙습니다.
+
 ### MCP 도구 (각 인스턴스가 자기 inbox에 대해 호출)
 
-- `send_to_peer({ to, content, kind?, task_id? })`
-- `respond_to_peer({ task_id, content })`
-- `list_peers()`
-- `whoami()` — 이 인스턴스의 현재 이름·URL
-- `register({ name })` — 런타임에 인스턴스 이름 변경 (슬래시 커맨드: `/cccp-register <name>`). `CCCP_NAME` 환경 변수 없이도 가능.
+메시징:
+- `send_to_peer({ to, content, kind?, task_id?, parent_task_id? })` — 1:1 전송.
+- `send_to_peers({ to, content, kind?, task_id?, parent_task_id? })` — 다중 전송. `to`는 peer 이름 배열 또는 `"*"` (자신 제외 모든 살아있는 peer). 모든 수신자가 같은 `task_id`를 공유.
+- `send_to_room({ room, content, kind?, task_id?, parent_task_id? })` — room의 살아있는 멤버 전원에게 브로드캐스트. 오프라인 멤버는 조용히 스킵.
+- `respond_to_peer({ task_id, content })` — 받은 task의 원 발신자에게 응답.
+
+Room (멤버십은 `~/.cccp/rooms/<name>.json`에 저장되어 세션 간 유지):
+- `create_room({ name, members? })` / `join_room({ name })` / `leave_room({ name })` / `list_rooms()`
+
+발견 / 신원:
+- `list_peers()`, `whoami()`, `register({ name })` (런타임 이름 변경; 슬래시 커맨드 `/cccp-register <name>`)
+
+권한:
 - `respond_permission({ peer, request_id, behavior })`
+
+### 스레딩 (`parent_task_id`)
+
+`task_id`는 하나의 스레드. `parent_task_id`로 위임 체인을 잇습니다:
+
+- alice → bob, `task_id=T1` (parent 없음).
+- bob이 T1을 받고 carol에게 재위임: `task_id=T2, parent_task_id=T1`.
+- carol의 channel 태그에 `task_id=T2`와 `parent_task_id=T1`이 모두 보여서 자신이 T1의 하위 작업을 하고 있음을 알 수 있음.
+- carol이 bob에게 `respond_to_peer({ task_id: T2 })`로 응답하면, bob은 다시 alice에게 `respond_to_peer({ task_id: T1 })`로 응답.
+
+### Room
+
+Room은 이름이 붙은 영속적인 peer 이름 목록입니다. 매번 peer를 일일이 열거하지 않고 안정적인 브로드캐스트 대상(예: `design-review`, `oncall`)을 갖고 싶을 때 사용.
+
+- 멤버십은 세션 재시작에도 유지 — 같은 이름으로 다시 join 가능.
+- `send_to_room`은 현재 살아있는 멤버에게만 전달하고, 스킵된 오프라인 멤버를 결과에 표시.
+- Room 메시지에 대한 응답은 `respond_to_peer`로 원 발신자에게만 갑니다 (방 전체로 가지 않음). 다시 전체로 답하려면 `send_to_room`을 다시 호출.
 
 ### HTTP 엔드포인트 (inbox 간 통신)
 
-| 경로                       | 페이로드                                                                          |
-| -------------------------- | --------------------------------------------------------------------------------- |
-| `POST /msg`                | `{ from, content, kind, task_id? }`                                               |
-| `POST /permission/request` | `{ from, request_id, tool_name, description, input_preview }`                     |
-| `POST /permission/verdict` | `{ from, request_id, behavior }`                                                  |
-| `GET /info`                | 자기 메타데이터                                                                   |
-| `GET /peers`               | 발견된 peer 목록                                                                  |
+| 경로                       | 페이로드                                                                                  |
+| -------------------------- | ----------------------------------------------------------------------------------------- |
+| `POST /msg`                | `{ from, content, kind, task_id?, parent_task_id?, room? }`                               |
+| `POST /permission/request` | `{ from, request_id, tool_name, description, input_preview }`                             |
+| `POST /permission/verdict` | `{ from, request_id, behavior }`                                                          |
+| `GET /info`                | 자기 메타데이터                                                                           |
+| `GET /peers`               | 발견된 peer 목록                                                                          |
 
 모든 `POST`는 `from` 필드가 **현재 살아있는 등록된 peer**여야 통과합니다 (sender
 allowlist). 자기 자신으로부터의 loopback은 허용.
@@ -237,9 +264,9 @@ cd server
 bun test
 ```
 
-23개 테스트: 13 단위(registry) + 10 통합(실제 inbox 프로세스를 띄워서 HTTP
-라우팅, sender gating, 채널 알림 발행, 들어오는/나가는 권한 릴레이 풀루프
-검증).
+44개 테스트: 23 단위(registry, room 포함) + 21 통합(실제 inbox 프로세스를
+띄워서 HTTP 라우팅, sender gating, 채널 알림 발행, 브로드캐스트 fan-out,
+room 전달, `parent_task_id` 스레딩, 들어오는/나가는 권한 릴레이 풀루프 검증).
 
 ---
 

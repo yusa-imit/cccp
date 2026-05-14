@@ -14,10 +14,20 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { defaultName, findPeer, listPeers, registerSelf } from './lib/registry.ts'
+import {
+  createRoom,
+  defaultName,
+  findPeer,
+  getRoom,
+  joinRoom,
+  leaveRoom,
+  listPeers,
+  listRooms,
+  registerSelf,
+} from './lib/registry.ts'
 
 let NAME = defaultName()
-const VERSION = '0.1.1'
+const VERSION = '0.2.0'
 const SUPERVISOR = process.env.CCCP_SUPERVISOR?.trim() || ''
 
 const log = (...args: unknown[]) => console.error('[cccp:' + NAME + ']', ...args)
@@ -29,7 +39,7 @@ const instructions = [
   `You are running as Claude Code instance "${NAME}" in a peer mesh of Claude Code sessions.`,
   '',
   '## Receiving messages',
-  'Inbound peer messages arrive as <channel source="cccp-inbox" sender="..." kind="..." task_id="...">body</channel>.',
+  'Inbound peer messages arrive as <channel source="cccp-inbox" sender="..." kind="..." task_id="..." [parent_task_id="..."] [room="..."]>body</channel>.',
   '',
   'CRITICAL: every inbound channel message MUST produce a visible response in this session.',
   'Never silently ignore a channel event. At a minimum, surface the message in your reply to the user.',
@@ -41,22 +51,33 @@ const instructions = [
   '  note         — Informational only (no action expected from the peer). Still tell the user it arrived. Reply only if useful.',
   '  perm-request — A peer wants you (or the user at this terminal) to approve their tool call. Decide allow vs deny based on the tool_name and description, then call respond_permission({ peer, request_id, behavior }).',
   '',
+  'Threading: when an inbound message carries parent_task_id, you are inside a sub-task chain. If you delegate or broadcast further work to handle this task, pass parent_task_id=<this message\'s task_id> on those outbound calls so the chain stays linked. When you reply, use respond_to_peer with the ORIGINAL task_id of the message you received.',
+  '',
+  'Rooms: when an inbound message carries room="<name>", multiple peers received the same broadcast. Replies still go to the original sender via respond_to_peer (not to the whole room). Use send_to_room only when you intentionally want to fan a message out to all members of a room.',
+  '',
   'Always echo task_id when continuing a thread so peers can correlate.',
   '',
   '## Sending messages',
   'Tools (from the cccp-inbox MCP server):',
-  '  send_to_peer({ to, content, kind?, task_id? })',
+  '  send_to_peer({ to, content, kind?, task_id?, parent_task_id? })',
   '    - Use kind="task" when the user (or you) wants the peer to actually DO something — "run", "build", "find", "fix", "check", "look at", etc. THIS IS THE DEFAULT FOR ACTION-ORIENTED MESSAGES.',
   '    - Use kind="note" only for genuinely passive information ("FYI", "I finished X", status updates).',
   '    - Use kind="reply" only when answering a specific inbound task (prefer respond_to_peer instead).',
+  '  send_to_peers({ to, content, kind?, task_id?, parent_task_id? }) — fan-out to multiple peers. `to` is either a string array of peer names OR the literal "*" to broadcast to every alive peer except yourself. All recipients share the same task_id, so their replies merge into one thread.',
+  '  send_to_room({ room, content, kind?, task_id?, parent_task_id? }) — broadcast to all alive members of a room (except yourself). The receivers see room="<name>" on the channel tag.',
   '  respond_to_peer({ task_id, content }) — convenience reply to the original sender of a task you received.',
   '  list_peers() — list currently alive peer instances.',
+  '  list_rooms() — list known rooms and their members.',
+  '  create_room({ name, members? }) — create a new room; this instance is added as a member automatically.',
+  '  join_room({ name }) — add this instance to a room (creates the room if it does not exist).',
+  '  leave_room({ name }) — remove this instance from a room (deletes the room if no members remain).',
   '  whoami() — this instance\'s current registered name.',
   '  register({ name }) — change this instance\'s name in the registry (so peers see it under the new name). Use when the user wants to rename / register the session at runtime instead of relying on the CCCP_NAME env var.',
   '  respond_permission({ peer, request_id, behavior }) — answer a peer\'s permission relay.',
   '',
   'When the user tells you to "tell / ask / have / make peer X do Y" or "send X to peer Y to run/build/check Z",',
   'use kind="task" — that is the only kind that causes the peer to do work.',
+  'When the user says "broadcast", "send to everyone", "ask all peers", or "ask the team / room <name>", prefer send_to_peers or send_to_room rather than looping send_to_peer.',
 ].join('\n')
 
 const mcp = new Server(
@@ -103,6 +124,38 @@ async function pushChannel(content: string, meta: Record<string, string>) {
   })
 }
 
+function newTaskId() {
+  return `${NAME}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+}
+
+type SendOpts = {
+  content: string
+  kind: string
+  task_id: string
+  parent_task_id?: string
+  room?: string
+}
+
+async function deliverTo(peerName: string, opts: SendOpts): Promise<{ ok: boolean; status: number; error?: string }> {
+  const peer = findPeer(peerName)
+  if (!peer) return { ok: false, status: 0, error: 'not alive' }
+  try {
+    const body: Record<string, unknown> = {
+      from: NAME,
+      content: opts.content,
+      kind: opts.kind,
+      task_id: opts.task_id,
+    }
+    if (opts.parent_task_id) body.parent_task_id = opts.parent_task_id
+    if (opts.room) body.room = opts.room
+    const res = await postJSON(`${peer.url}/msg`, body)
+    if (!res.ok) return { ok: false, status: res.status, error: await res.text() }
+    return { ok: true, status: res.status }
+  } catch (err: any) {
+    return { ok: false, status: 0, error: err?.message ?? String(err) }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
@@ -111,7 +164,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'send_to_peer',
       description:
-        'Send a message to a peer Claude Code instance. CHOOSE KIND CAREFULLY: use kind="task" when you want the peer to actually do work (run a command, find/build/check something, answer a question). Use kind="note" ONLY for passive information ("FYI…", status updates) — notes do NOT cause the peer to act. If you are unsure, prefer kind="task".',
+        'Send a message to a single peer Claude Code instance. CHOOSE KIND CAREFULLY: use kind="task" when you want the peer to actually do work (run a command, find/build/check something, answer a question). Use kind="note" ONLY for passive information ("FYI…", status updates) — notes do NOT cause the peer to act. If you are unsure, prefer kind="task". To fan out to multiple peers, use send_to_peers; to address a room, use send_to_room.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -126,9 +179,123 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'Correlation id. Required for replies; auto-generated for new tasks.',
           },
+          parent_task_id: {
+            type: 'string',
+            description:
+              'Optional parent thread id. Set this when the new message is a sub-task of an inbound task you received — pass that inbound task\'s task_id here so the receiver can see the chain.',
+          },
         },
         required: ['to', 'content'],
       },
+    },
+    {
+      name: 'send_to_peers',
+      description:
+        'Broadcast the same message to multiple peers at once. All recipients receive an identical task_id, so their replies merge into one thread on your side. Use this instead of looping send_to_peer when the user says "ask everyone", "broadcast", or names multiple peers.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: {
+            description:
+              'Either an array of peer names, or the literal string "*" to address every alive peer except yourself.',
+            oneOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'string', enum: ['*'] },
+            ],
+          },
+          content: { type: 'string', description: 'Message body.' },
+          kind: {
+            type: 'string',
+            enum: ['task', 'reply', 'note'],
+            description: 'Message intent. Default "note".',
+          },
+          task_id: {
+            type: 'string',
+            description: 'Shared correlation id; auto-generated if omitted.',
+          },
+          parent_task_id: {
+            type: 'string',
+            description: 'Optional parent thread id (see send_to_peer).',
+          },
+        },
+        required: ['to', 'content'],
+      },
+    },
+    {
+      name: 'send_to_room',
+      description:
+        'Broadcast a message to all currently-alive members of a room (except yourself). Receivers see room="<name>" on the inbound channel tag.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          room: { type: 'string', description: 'Room name (see list_rooms).' },
+          content: { type: 'string', description: 'Message body.' },
+          kind: {
+            type: 'string',
+            enum: ['task', 'reply', 'note'],
+            description: 'Message intent. Default "note".',
+          },
+          task_id: {
+            type: 'string',
+            description: 'Shared correlation id; auto-generated if omitted.',
+          },
+          parent_task_id: {
+            type: 'string',
+            description: 'Optional parent thread id (see send_to_peer).',
+          },
+        },
+        required: ['room', 'content'],
+      },
+    },
+    {
+      name: 'create_room',
+      description:
+        'Create a new room. The current instance is added as a member automatically. Optionally provide an initial list of other peer names to add as members. Fails if a room with that name already exists.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Room name. Allowed characters: letters, digits, underscore, hyphen, dot. 1-64 chars.',
+          },
+          members: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional peer names to add as initial members.',
+          },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'join_room',
+      description:
+        'Add this instance to a room. Creates the room if it does not exist (with this instance as the sole member and owner).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Room name.' },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'leave_room',
+      description:
+        'Remove this instance from a room. If no members remain, the room is deleted.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Room name.' },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'list_rooms',
+      description:
+        'List all rooms known on this machine and their members. Membership persists across sessions until a peer explicitly leaves the room.',
+      inputSchema: { type: 'object', properties: {} },
     },
     {
       name: 'respond_to_peer',
@@ -194,19 +361,119 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const to = String(args.to ?? '')
         const content = String(args.content ?? '')
         const kind = (args.kind as string) || 'note'
-        const task_id =
-          (args.task_id as string) ||
-          `${NAME}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-        const peer = findPeer(to)
-        if (!peer) return toolErr(`peer not found: ${to}. Try list_peers.`)
-        const res = await postJSON(`${peer.url}/msg`, {
-          from: NAME,
-          content,
-          kind,
-          task_id,
-        })
-        if (!res.ok) return toolErr(`peer ${to} returned ${res.status}: ${await res.text()}`)
-        return toolOk(`sent kind=${kind} task_id=${task_id} to ${to}`)
+        const task_id = (args.task_id as string) || newTaskId()
+        const parent_task_id = (args.parent_task_id as string) || undefined
+        const result = await deliverTo(to, { content, kind, task_id, parent_task_id })
+        if (!result.ok)
+          return toolErr(`peer ${to} delivery failed (${result.status || 'offline'}): ${result.error ?? ''}`)
+        return toolOk(
+          `sent kind=${kind} task_id=${task_id}${parent_task_id ? ` parent_task_id=${parent_task_id}` : ''} to ${to}`,
+        )
+      }
+
+      case 'send_to_peers': {
+        const rawTo = args.to
+        const content = String(args.content ?? '')
+        const kind = (args.kind as string) || 'note'
+        const task_id = (args.task_id as string) || newTaskId()
+        const parent_task_id = (args.parent_task_id as string) || undefined
+
+        let targets: string[]
+        if (rawTo === '*') {
+          targets = listPeers(NAME).map((p) => p.name)
+        } else if (Array.isArray(rawTo)) {
+          targets = (rawTo as unknown[]).map((v) => String(v)).filter((v) => v && v !== NAME)
+        } else {
+          return toolErr('to must be a string array or the literal "*"')
+        }
+        if (targets.length === 0) return toolErr('no peers to send to (all peers offline or list empty)')
+
+        const results = await Promise.all(
+          targets.map(async (name) => ({ name, ...(await deliverTo(name, { content, kind, task_id, parent_task_id })) })),
+        )
+        const ok = results.filter((r) => r.ok).map((r) => r.name)
+        const failed = results.filter((r) => !r.ok)
+        const lines: string[] = []
+        lines.push(`broadcast kind=${kind} task_id=${task_id}${parent_task_id ? ` parent_task_id=${parent_task_id}` : ''}`)
+        lines.push(`delivered: ${ok.length ? ok.join(', ') : '(none)'}`)
+        if (failed.length)
+          lines.push(`failed: ${failed.map((f) => `${f.name} (${f.error ?? f.status})`).join(', ')}`)
+        return failed.length && ok.length === 0 ? toolErr(lines.join('\n')) : toolOk(lines.join('\n'))
+      }
+
+      case 'send_to_room': {
+        const room_name = String(args.room ?? '')
+        const content = String(args.content ?? '')
+        const kind = (args.kind as string) || 'note'
+        const task_id = (args.task_id as string) || newTaskId()
+        const parent_task_id = (args.parent_task_id as string) || undefined
+        const room = getRoom(room_name)
+        if (!room) return toolErr(`room not found: ${room_name}. Try list_rooms or create_room.`)
+        const alivePeers = new Set(listPeers().map((p) => p.name))
+        const targets = room.members.filter((m) => m !== NAME && alivePeers.has(m))
+        const offline = room.members.filter((m) => m !== NAME && !alivePeers.has(m))
+        if (targets.length === 0)
+          return toolErr(
+            `no alive recipients in room "${room_name}" (members: ${room.members.join(', ') || '(none)'})`,
+          )
+        const results = await Promise.all(
+          targets.map(async (name) => ({
+            name,
+            ...(await deliverTo(name, { content, kind, task_id, parent_task_id, room: room_name })),
+          })),
+        )
+        const ok = results.filter((r) => r.ok).map((r) => r.name)
+        const failed = results.filter((r) => !r.ok)
+        const lines: string[] = []
+        lines.push(
+          `room=${room_name} kind=${kind} task_id=${task_id}${parent_task_id ? ` parent_task_id=${parent_task_id}` : ''}`,
+        )
+        lines.push(`delivered: ${ok.length ? ok.join(', ') : '(none)'}`)
+        if (failed.length)
+          lines.push(`failed: ${failed.map((f) => `${f.name} (${f.error ?? f.status})`).join(', ')}`)
+        if (offline.length) lines.push(`offline members skipped: ${offline.join(', ')}`)
+        return failed.length && ok.length === 0 ? toolErr(lines.join('\n')) : toolOk(lines.join('\n'))
+      }
+
+      case 'create_room': {
+        const room_name = String(args.name ?? '')
+        const members = Array.isArray(args.members)
+          ? (args.members as unknown[]).map((v) => String(v))
+          : []
+        try {
+          const rec = createRoom(room_name, NAME, members)
+          return toolOk(`created room "${rec.name}" with members: ${rec.members.join(', ')}`)
+        } catch (err: any) {
+          return toolErr(err?.message ?? String(err))
+        }
+      }
+
+      case 'join_room': {
+        const room_name = String(args.name ?? '')
+        try {
+          const rec = joinRoom(room_name, NAME)
+          return toolOk(`joined room "${rec.name}" — members: ${rec.members.join(', ')}`)
+        } catch (err: any) {
+          return toolErr(err?.message ?? String(err))
+        }
+      }
+
+      case 'leave_room': {
+        const room_name = String(args.name ?? '')
+        const rec = leaveRoom(room_name, NAME)
+        if (!rec) return toolErr(`room not found: ${room_name}`)
+        if (rec.members.length === 0) return toolOk(`left and deleted room "${room_name}" (no members remaining)`)
+        return toolOk(`left room "${room_name}" — remaining members: ${rec.members.join(', ')}`)
+      }
+
+      case 'list_rooms': {
+        const rooms = listRooms()
+        if (rooms.length === 0) return toolOk('no rooms')
+        return toolOk(
+          rooms
+            .map((r) => `- ${r.name}  members=[${r.members.join(', ')}]  createdBy=${r.createdBy}`)
+            .join('\n'),
+        )
       }
 
       case 'respond_to_peer': {
@@ -214,15 +481,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const content = String(args.content ?? '')
         const origin = inboundTaskOrigins.get(task_id)
         if (!origin) return toolErr(`no inbound task with task_id=${task_id}`)
-        const peer = findPeer(origin)
-        if (!peer) return toolErr(`origin peer ${origin} no longer alive`)
-        const res = await postJSON(`${peer.url}/msg`, {
-          from: NAME,
-          content,
-          kind: 'reply',
-          task_id,
-        })
-        if (!res.ok) return toolErr(`peer ${origin} returned ${res.status}`)
+        const result = await deliverTo(origin, { content, kind: 'reply', task_id })
+        if (!result.ok)
+          return toolErr(`reply to ${origin} failed (${result.status || 'offline'}): ${result.error ?? ''}`)
         return toolOk(`reply sent to ${origin} for task_id=${task_id}`)
       }
 
@@ -375,19 +636,27 @@ const server = Bun.serve({
       const content = String(body.content ?? '')
       const kind = String(body.kind ?? 'note')
       const task_id = String(body.task_id ?? '')
-      log(`/msg accepted: from=${from} kind=${kind} task_id=${task_id}`)
+      const parent_task_id = body.parent_task_id ? String(body.parent_task_id) : ''
+      const room = body.room ? String(body.room) : ''
+      log(
+        `/msg accepted: from=${from} kind=${kind} task_id=${task_id}` +
+          (parent_task_id ? ` parent_task_id=${parent_task_id}` : '') +
+          (room ? ` room=${room}` : ''),
+      )
       if (kind === 'task' && task_id) inboundTaskOrigins.set(task_id, from)
       await pushChannel(content, {
         sender: from,
         kind,
         ...(task_id ? { task_id } : {}),
+        ...(parent_task_id ? { parent_task_id } : {}),
+        ...(room ? { room } : {}),
       })
       log(`/msg notification pushed to Claude (sender=${from} kind=${kind})`)
       // Also write a debug marker so out-of-band tests can detect delivery.
       try {
         require('node:fs').appendFileSync(
           `/tmp/cccp-${NAME}-msg.log`,
-          JSON.stringify({ at: Date.now(), from, kind, task_id, content }) + '\n',
+          JSON.stringify({ at: Date.now(), from, kind, task_id, parent_task_id, room, content }) + '\n',
         )
       } catch {}
       return new Response('ok')

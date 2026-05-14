@@ -2,7 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { defaultName, findPeer, listPeers, registerSelf } from '../lib/registry.ts'
+import {
+  createRoom,
+  defaultName,
+  findPeer,
+  getRoom,
+  joinRoom,
+  leaveRoom,
+  listPeers,
+  listRooms,
+  registerSelf,
+} from '../lib/registry.ts'
 
 let TMP = ''
 
@@ -139,5 +149,68 @@ describe('findPeer', () => {
     const c = registerSelf({ name: 'c', url: 'http://x:3', pid: process.pid, capabilities: [] })
     expect(findPeer('c')?.url).toBe('http://x:3')
     c()
+  })
+})
+
+describe('rooms', () => {
+  test('createRoom writes a record with the owner as member', () => {
+    const rec = createRoom('design', 'alice')
+    expect(rec.name).toBe('design')
+    expect(rec.members).toContain('alice')
+    expect(rec.createdBy).toBe('alice')
+    expect(getRoom('design')?.members).toEqual(['alice'])
+  })
+
+  test('createRoom dedupes initial members and includes owner', () => {
+    const rec = createRoom('r', 'alice', ['bob', 'alice', 'carol'])
+    expect(rec.members.sort()).toEqual(['alice', 'bob', 'carol'])
+  })
+
+  test('createRoom rejects duplicate name', () => {
+    createRoom('dup', 'alice')
+    expect(() => createRoom('dup', 'bob')).toThrow(/already exists/)
+  })
+
+  test('createRoom rejects invalid names', () => {
+    expect(() => createRoom('bad name!', 'alice')).toThrow(/invalid room name/)
+    expect(() => createRoom('', 'alice')).toThrow(/invalid room name/)
+  })
+
+  test('joinRoom appends a member and is idempotent', () => {
+    createRoom('team', 'alice')
+    joinRoom('team', 'bob')
+    joinRoom('team', 'bob')
+    expect(getRoom('team')?.members.sort()).toEqual(['alice', 'bob'])
+  })
+
+  test('joinRoom creates the room if it does not exist', () => {
+    joinRoom('fresh', 'alice')
+    expect(getRoom('fresh')?.members).toEqual(['alice'])
+    expect(getRoom('fresh')?.createdBy).toBe('alice')
+  })
+
+  test('leaveRoom removes a member', () => {
+    createRoom('t', 'alice', ['bob'])
+    const rec = leaveRoom('t', 'bob')
+    expect(rec?.members).toEqual(['alice'])
+  })
+
+  test('leaveRoom deletes the room when no members remain', () => {
+    createRoom('solo', 'alice')
+    leaveRoom('solo', 'alice')
+    expect(getRoom('solo')).toBeUndefined()
+  })
+
+  test('leaveRoom returns undefined for unknown rooms', () => {
+    expect(leaveRoom('nope', 'alice')).toBeUndefined()
+  })
+
+  test('listRooms returns all rooms', () => {
+    createRoom('a', 'alice')
+    createRoom('b', 'alice', ['bob'])
+    const names = listRooms()
+      .map((r) => r.name)
+      .sort()
+    expect(names).toEqual(['a', 'b'])
   })
 })

@@ -205,29 +205,56 @@ Whichever side answers first wins (local terminal vs. remote peer).
 ### Channel tag (receiver side)
 
 ```
-<channel source="cccp-inbox" sender="<peer>" kind="task|reply|note|perm-request" task_id="..."[, ...]>
+<channel source="cccp-inbox" sender="<peer>" kind="task|reply|note|perm-request" task_id="..." [parent_task_id="..."] [room="..."]>
 body
 </channel>
 ```
 
+`parent_task_id` appears when the sender is sub-delegating an outer task. `room` appears when the message was sent via `send_to_room`.
+
 ### MCP tools (each instance calls these on its own inbox)
 
-- `send_to_peer({ to, content, kind?, task_id? })`
-- `respond_to_peer({ task_id, content })`
-- `list_peers()`
-- `whoami()` — this instance's current name and URL
-- `register({ name })` — rename this instance at runtime (slash command: `/cccp-register <name>`). Lets you skip the `CCCP_NAME` env var.
+Messaging:
+- `send_to_peer({ to, content, kind?, task_id?, parent_task_id? })` — single peer.
+- `send_to_peers({ to, content, kind?, task_id?, parent_task_id? })` — fan-out. `to` is a string array, or the literal `"*"` for every alive peer except self. All recipients share one `task_id`.
+- `send_to_room({ room, content, kind?, task_id?, parent_task_id? })` — broadcast to all alive members of a room. Offline members are silently skipped.
+- `respond_to_peer({ task_id, content })` — reply to the original sender of an inbound task.
+
+Rooms (membership stored in `~/.cccp/rooms/<name>.json`, persists across sessions):
+- `create_room({ name, members? })` / `join_room({ name })` / `leave_room({ name })` / `list_rooms()`
+
+Discovery / identity:
+- `list_peers()`, `whoami()`, `register({ name })` (rename at runtime; slash command `/cccp-register <name>`).
+
+Permissions:
 - `respond_permission({ peer, request_id, behavior })`
+
+### Threading (`parent_task_id`)
+
+A `task_id` is a single thread. `parent_task_id` builds a chain across delegations:
+
+- alice → bob with `task_id=T1` (no parent).
+- bob receives T1, sub-delegates to carol with `task_id=T2, parent_task_id=T1`.
+- carol's channel tag shows both `task_id=T2` and `parent_task_id=T1`, so she knows she's working on a sub-task of T1.
+- carol replies to bob with `respond_to_peer({ task_id: T2 })`; bob, in turn, replies to alice with `respond_to_peer({ task_id: T1 })`.
+
+### Rooms
+
+A room is a named, persistent list of peer names. Use rooms when you want a stable broadcast target (e.g. `design-review`, `oncall`) rather than enumerating peers each time.
+
+- Membership survives session restarts — peers can rejoin under the same name.
+- `send_to_room` delivers only to currently-alive members and reports which offline members were skipped.
+- A reply to a room message still goes to the original sender via `respond_to_peer`, not the whole room — call `send_to_room` again if you want to fan an answer back out.
 
 ### HTTP endpoints (inbox-to-inbox traffic)
 
-| Path                       | Payload                                                                          |
-| -------------------------- | -------------------------------------------------------------------------------- |
-| `POST /msg`                | `{ from, content, kind, task_id? }`                                              |
-| `POST /permission/request` | `{ from, request_id, tool_name, description, input_preview }`                    |
-| `POST /permission/verdict` | `{ from, request_id, behavior }`                                                 |
-| `GET /info`                | this instance's metadata                                                         |
-| `GET /peers`               | discovered peers                                                                 |
+| Path                       | Payload                                                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `POST /msg`                | `{ from, content, kind, task_id?, parent_task_id?, room? }`                                                   |
+| `POST /permission/request` | `{ from, request_id, tool_name, description, input_preview }`                                                 |
+| `POST /permission/verdict` | `{ from, request_id, behavior }`                                                                              |
+| `GET /info`                | this instance's metadata                                                                                      |
+| `GET /peers`               | discovered peers                                                                                              |
 
 Every `POST` requires `from` to match a **currently-alive registered peer**
 (sender allowlist; loopback from self is also allowed).
@@ -241,9 +268,10 @@ cd server
 bun test
 ```
 
-23 tests: 13 unit (registry) + 10 integration (spawns real inbox processes,
-verifies HTTP routing, sender gating, channel notification emission, and the
-full inbound/outbound permission-relay loop).
+44 tests: 23 unit (registry, including rooms) + 21 integration (spawns real
+inbox processes, verifies HTTP routing, sender gating, channel notification
+emission, broadcast fan-out, room delivery, threading via `parent_task_id`,
+and the full inbound/outbound permission-relay loop).
 
 ---
 
