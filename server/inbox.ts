@@ -27,7 +27,7 @@ import {
 } from './lib/registry.ts'
 
 let NAME = defaultName()
-const VERSION = '0.2.0'
+const VERSION = '0.1.2'
 const SUPERVISOR = process.env.CCCP_SUPERVISOR?.trim() || ''
 
 const log = (...args: unknown[]) => console.error('[cccp:' + NAME + ']', ...args)
